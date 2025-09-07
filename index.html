@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>ESP32 Web Serial Terminal</title>
+    <style>
+        :root {
+            --bg: #000000;
+            --accent: #00ff00;
+            --muted: #777;
+            --text: #00ff00;
+        }
+
+        html,
+        body {
+            height: 100%;
+            margin: 0;
+            font-family: monospace;
+            background: var(--bg);
+            color: var(--text);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .controls {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            padding: 6px;
+            background: #111;
+            color: var(--muted);
+            flex-shrink: 0;
+        }
+
+        select,
+        input,
+        button {
+            background: #000;
+            border: 1px solid #333;
+            color: var(--text);
+            padding: 4px 6px;
+            border-radius: 4px;
+            font-family: monospace;
+            cursor: pointer;
+        }
+
+        button.primary {
+            background: #003300;
+            border: none;
+            color: var(--text);
+
+        }
+
+        .terminal {
+            flex: 1;
+            background: #000;
+            padding: 10px;
+            overflow-y: auto;
+            overflow-x: hidden;
+            font-family: monospace;
+            font-size: 14px;
+            line-height: 1.4;
+            white-space: pre-wrap;
+            word-break: break-word;
+            width: 100%;
+        }
+
+        .status {
+            font-size: 12px;
+            color: var(--muted);
+            margin-left: auto;
+        }
+
+        .log-line {
+            display: block;
+            width: 100%;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .input-area {
+            display: flex;
+            align-items: center;
+            background: #000;
+            padding: 6px;
+            border-top: 1px solid #222;
+            flex-shrink: 0;
+        }
+
+        .input-area span {
+            color: var(--accent);
+            margin-right: 6px;
+        }
+
+        #commandInput {
+            flex: 1;
+            background: #000;
+            border: none;
+            outline: none;
+            color: var(--text);
+            font-family: monospace;
+            font-size: 14px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="controls">
+        <button id="connectBtn" class="primary">Connect</button>
+        <button id="disconnectBtn">Disconnect</button>
+        <label>
+            Baud:
+            <select id="baudSelect">
+                <option>115200</option>
+                <option>9600</option>
+                <option>74880</option>
+                <option>57600</option>
+                <option>230400</option>
+                <option>460800</option>
+                <option>921600</option>
+                <option>Custom...</option>
+            </select>
+        </label>
+        <input id="customBaud" placeholder="enter baud" style="width:90px;display:none" />
+        <label>
+            Ending:
+            <select id="lineEnding">
+                <option value="none">None</option>
+                <option value="\n">LF (\n)</option>
+                <option value="\r\n">CRLF (\r\n)</option>
+                <option value="\r">CR (\r)</option>
+            </select>
+        </label>
+        <span class="status" id="status">Not connected</span>
+    </div>
+
+    <div id="terminal" class="terminal"></div>
+
+    <div class="input-area">
+        <span>&gt;</span>
+        <input id="commandInput" type="text" placeholder="Type command here..." autocomplete="off" />
+    </div>
+
+    <script>
+        let port = null;
+        let reader = null;
+        let inputDone = null;
+        let outputDone = null;
+        let outputStream = null;
+        let keepReading = false;
+
+        const connectBtn = document.getElementById('connectBtn');
+        const disconnectBtn = document.getElementById('disconnectBtn');
+        const baudSelect = document.getElementById('baudSelect');
+        const customBaud = document.getElementById('customBaud');
+        const lineEnding = document.getElementById('lineEnding');
+        const terminal = document.getElementById('terminal');
+        const status = document.getElementById('status');
+        const commandInput = document.getElementById('commandInput');
+
+        let lineBuffer = "";
+
+        baudSelect.addEventListener('change', () => {
+            customBaud.style.display = baudSelect.value === 'Custom...' ? 'inline-block' : 'none';
+        });
+
+        function getBaudRate() {
+            if (baudSelect.value === 'Custom...') {
+                const n = parseInt(customBaud.value);
+                return Number.isFinite(n) && n > 0 ? n : 115200;
+            }
+            return parseInt(baudSelect.value);
+        }
+
+        async function connect() {
+            if (!('serial' in navigator)) {
+                alert('Web Serial API not supported. Use Chrome/Edge/Brave.');
+                return;
+            }
+            try {
+                port = await navigator.serial.requestPort();
+                await port.open({ baudRate: getBaudRate() });
+                keepReading = true;
+                readLoop();
+                const encoder = new TextEncoderStream();
+                outputDone = encoder.readable.pipeTo(port.writable);
+                outputStream = encoder.writable.getWriter();
+                status.textContent = `Connected @ ${getBaudRate()} baud`;
+                connectBtn.disabled = true;
+                disconnectBtn.disabled = false;
+            } catch (e) {
+                console.error(e);
+                status.textContent = 'Connection failed';
+            }
+        }
+
+        async function disconnect() {
+            keepReading = false;
+            if (reader) { try { await reader.cancel(); } catch { } reader = null; }
+            if (inputDone) { await inputDone.catch(() => { }); inputDone = null; }
+            if (outputStream) { await outputStream.close(); outputStream = null; }
+            if (outputDone) { await outputDone.catch(() => { }); outputDone = null; }
+            if (port) { try { await port.close(); } catch { } port = null; }
+            status.textContent = 'Disconnected';
+            connectBtn.disabled = false;
+            disconnectBtn.disabled = true;
+        }
+
+        async function readLoop() {
+            const textDecoder = new TextDecoderStream();
+            try {
+                inputDone = port.readable.pipeTo(textDecoder.writable);
+                reader = textDecoder.readable.getReader();
+                while (keepReading) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    if (value) appendToTerminal(value);
+                }
+            } catch (e) {
+                appendToTerminal(`\n[ERROR] ${e}\n`);
+            }
+        }
+
+        function appendToTerminal(text) {
+            text = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+            lineBuffer += text;
+            const lines = lineBuffer.split("\n");
+            lineBuffer = lines.pop();
+
+            for (const line of lines) {
+                const div = document.createElement('div');
+                div.className = 'log-line';
+                div.textContent = line;
+                terminal.appendChild(div);
+            }
+
+            if (lineBuffer.length > 0) {
+                let activeLine = document.getElementById("active-line");
+                if (!activeLine) {
+                    activeLine = document.createElement("div");
+                    activeLine.id = "active-line";
+                    activeLine.className = "log-line";
+                    terminal.appendChild(activeLine);
+                }
+                activeLine.textContent = lineBuffer;
+            }
+
+            terminal.scrollTop = terminal.scrollHeight;
+        }
+
+        async function sendLine(line) {
+            if (!outputStream) return;
+            const ending = lineEnding.value === 'none' ? '' : lineEnding.value;
+
+            if (line.trim() === "clear") {
+                terminal.innerHTML = "";
+                lineBuffer = "";
+                commandInput.value = "";
+                return;
+            }
+
+            appendToTerminal(`> ${line}\n`);
+            await outputStream.write(line + ending);
+        }
+
+        commandInput.addEventListener('keydown', async (e) => {
+            if (e.key === "Enter") {
+                e.preventDefault();
+                const cmd = commandInput.value.trim();
+                if (cmd !== "") {
+                    await sendLine(cmd);
+                }
+                commandInput.value = "";
+            }
+        });
+
+        connectBtn.addEventListener('click', connect);
+        disconnectBtn.addEventListener('click', disconnect);
+        disconnectBtn.disabled = true;
+    </script>
+</body>
+
+</html>
