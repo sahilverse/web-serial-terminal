@@ -162,11 +162,6 @@ This project is open source and available for modification and distribution.
 
 Feel free to submit issues, feature requests, or pull requests to improve this terminal.
 
-## Version History
-
-- v1.0: Initial release with basic serial communication
-- v1.1: Added command input area and improved terminal interface
-- v1.2: Enhanced text handling and clear command functionality
 
 ---
 
